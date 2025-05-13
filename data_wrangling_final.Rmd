@@ -1,0 +1,430 @@
+---
+title: "Data_wrangling"
+author: "Thijs Carrière"
+date: "24-5-2024"
+output: html_document
+---
+
+# 0. Introduction 
+
+The code in this document prepares the raw data to the variables used in the analyses presented in the manuscript "The effects of personalized feedback on participant behavior in an app-based diary study". 
+
+This first code block loads the packages used in this document and loads the data used.
+
+```{r message=FALSE, warning=FALSE}
+# Packages
+library(tidyverse)
+library(haven)
+library(labelled)
+library(lubridate)
+library(chron)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(patchwork)
+library(ggpattern)
+library(margins)
+
+# Read in data
+
+# Number of visits per screen
+clicks <- read.csv("../Data/Data export 02-12-21/nl_paradataClicks.csv")
+
+# App usage with time stamps
+times <- read.csv("../Data/Data export 02-12-21/nl_paradataDateTimes.csv")
+
+# Transaction data (data on the entries made in the app, both scans and manual entries)
+transactions <- read.csv("../Data/Data export 02-12-21/NLtransplus.csv")
+
+# Number of seconds per screen type
+screen_times <- read.csv("../Data/Data export 02-12-21/nl_paradataScreenTimes.csv")
+
+# Summary data
+app_usage <- read.csv("../Data/Data export 02-12-21/NLhhsummary.csv")
+
+# Background questionnaire
+background <- read.csv("../Data/Data export 02-12-21/NLrespanalysis.csv")
+
+```
+
+
+# 1. Durations
+
+We try to calculate duration times for each action. We filter per individual, and order the actions per date. Than the difference in time is calculated until the next action. Here, we did not yet account for different devices. The obtained times are seen as screentimes and are used as the primary data in the analysis of this study.
+
+```{r}
+# Split the times
+data_new <- times
+
+# Create variables where data can be stored
+data_new$duration <- NA
+data_new$day <- NA
+
+data_save <- data_new[1,]
+
+
+# Select the unique users
+unique_users <- unique(data_new$userName)
+
+# Calculate duration per person 
+for(i in 1:length(unique_users)){
+  data_pers <- data_new %>% filter(userName == unique_users[i])
+  data_pers$duration <- NA
+  data_pers <- data_pers[order(data_pers$time),]
+  
+  # Per person make the list
+  for(j in 1:(nrow(data_pers)-1)){
+    data_pers$duration[j] <- as.numeric(difftime(data_pers$time[j+1], data_pers$time[j], units = "secs"))
+    data_pers$day[j] <- ceiling(as.numeric(difftime(data_pers$time[j], data_pers$time[1], units = "days")))
+  }
+  
+  # merge the duration with the original frame
+  data_save <- rbind(data_save, data_pers)
+}
+
+# Delete 'storage row'
+data_save <- data_save[-1,]
+
+# Save updated dataframe
+write.csv(data_save, "../Thijs/time_frame.csv")
+```
+
+Next, we create subsets of data used further in the script
+
+```{r}
+# Make a subset of the insights screens
+insights <- data_save %>% filter(objectName == "InsightsScreen")
+
+# Separate data frame with days
+days <- data_save %>% filter(objectName == "InsightsScreen")
+
+# New labels for feedback
+days$feedback <- NA
+days$feedback[grep(".*delayed.*", days$groupName)] <- "delayed"
+days$feedback[grep(".*all.*", days$groupName)] <- "instant"
+
+# Rename the 'userName' variable
+names(days)[names(days) == "userName"] <- "username"
+
+```
+
+# 2. Visit variables
+
+The next block of code creates variables for the number of visits and mean duration of visits for each participant for each study phase.
+
+```{r}
+# Create list of usernames as storage object
+active_users <- unique(days$username)
+active_visits_df <- as.data.frame(active_users)
+colnames(active_visits_df) <- c("username")
+
+# Variables
+active_visits_df$phase1_visits <- NA
+active_visits_df$phase2_visits <- NA
+active_visits_df$phase3_visits <- NA
+active_visits_df$phase4_visits <- NA
+active_visits_df$phase1_duration <- NA
+active_visits_df$phase2_duration <- NA
+active_visits_df$phase3_duration <- NA
+active_visits_df$phase4_duration <- NA
+
+# Calculate variables
+for(i in 1:length(active_users)){
+  pers <- days %>% filter(username == active_users[i]) %>% filter(duration > 4)
+  
+  # Calculate number of visits
+  active_visits_df$phase1_visits[i] <- pers %>% filter(day == 1) %>% nrow()
+  active_visits_df$phase2_visits[i] <- pers %>% filter(day > 1 & day < 8) %>% nrow()
+  active_visits_df$phase3_visits[i] <- pers %>% filter(day > 7 & day < 14) %>% nrow()
+  active_visits_df$phase4_visits[i] <- pers %>% filter(day > 13 & day < 20) %>% nrow()
+  
+  # Calculate average duration of visits
+  pers_phase1 <- pers %>% filter(day == 1)
+  active_visits_df$phase1_duration[i] <- mean(pers_phase1$duration, na.rm = T)
+  
+  pers_phase2 <- pers %>% filter(day > 1 & day < 8)
+  active_visits_df$phase2_duration[i] <- mean(pers_phase2$duration, na.rm = T)
+  
+  pers_phase3 <- pers %>% filter(day > 7 & day < 14) 
+  active_visits_df$phase3_duration[i] <- mean(pers_phase3$duration, na.rm = T)
+  
+  pers_phase4 <- pers %>% filter(day > 13 & day < 20)
+  active_visits_df$phase4_duration[i] <- mean(pers_phase4$duration, na.rm = T)
+}
+
+# Adjust NaN with Na
+active_visits_df <- active_visits_df %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+# Link new variables to background data frame
+background <- left_join(background, active_visits_df, by = "username")
+```
+
+Next, we calculate the last (meaningful) visit for each participant
+
+```{r}
+# Mark last visit / last meaningful visit
+# Create saving object
+days$last_day <- "no"
+save <- days[1,]
+
+for(i in 1:length(unique(days$username))){
+  
+  # filter days per person
+  sub_days <- days %>% filter(username == unique(days$username)[i])
+  sub_days$last_day[sub_days$day == max(sub_days$day)] <- "yes"
+  
+  # select only last day
+  sub2 <- sub_days %>% filter(last_day == "yes")
+  save <- rbind(save, sub2)
+}
+
+# Delete first row
+max_day <- save[-1,]
+
+# Filter out people that have multiple visits on their last day
+max_day <- max_day %>% select(-time, -timestamp, -duration)
+max_day <- unique(max_day)
+```
+
+```{r}
+# Obtain the last active day for each participant that they had a look at their feedback
+# Create saving object
+days$last_day <- "no"
+save <- days[1,]
+
+for(i in 1:length(unique(days$username))){
+  
+  # filter days per person
+  sub_days <- days %>% filter(username == unique(days$username)[i]) %>% 
+    filter(day < 31)
+  sub_days$last_day[sub_days$day == max(sub_days$day)] <- "yes"
+  
+  # select only last day
+  sub2 <- sub_days %>% filter(last_day == "yes")
+  save <- rbind(save, sub2)
+}
+
+# Delete first row
+max_day4 <- save[-1,]
+
+# Filter out people that have multiple visits on their last day
+max_day4 <- max_day4 %>% select(-time, -timestamp, -duration)
+max_day4 <- unique(max_day4)
+
+# Frame with final visit (capped at 30 days)
+maxDayFrame <- max_day4 %>% select(username, day)
+colnames(maxDayFrame) <- c("username", "day_last_feedback_visit")
+# The frames are combined in the code block 'add data on insights ...', below in this code
+```
+
+Next, we calculate the number of meaningful visits (= visits longer than 4 seconds) for each person, as well as the day of the first meaningful visit, the day of the last meaningful visit, and the number of meaningful visits after 14 days in the study
+
+```{r, message=F, warning=F}
+#### Calculate number of 'meaningful' feedback visits per person (= > 5 seconds)
+
+# Storing object
+number_meaningful <- as.data.frame(unique(days$username))
+number_meaningful$amount <- NA
+number_meaningful$first_meaningful <- NA
+number_meaningful$last_meaningful <- NA
+number_meaningful$after14 <- NA
+
+# Calculate # of meaningful visits
+for(i in 1:length(unique(days$username))){
+  obj <- days %>% 
+    filter(username == unique(days$username)[i]) %>% 
+    filter(duration > 5)
+  number_meaningful$amount[i] <- nrow(obj)
+  
+  # first and last meaningful visits
+  obj2 <- obj %>% filter(day < 31)
+  number_meaningful$first_meaningful[i] <- min(obj2$day, na.rm = T)
+  number_meaningful$last_meaningful[i] <- max(obj2$day, na.rm = T)
+  
+  # number meaningful after 14 days
+  obj3 <- obj %>% filter(day > 13)
+  number_meaningful$after14[i] <- nrow(obj3)
+}
+
+# adjust colnames data frame, integrated at later point in code
+colnames(number_meaningful) <- c("username", "meaningful_feedback_visits", "first_meaningful", "last_meaningful", "number_after14")
+
+# replace inf-values with NA
+number_meaningful$first_meaningful[is.infinite(number_meaningful$first_meaningful)] <- NA
+number_meaningful$last_meaningful[is.infinite(number_meaningful$last_meaningful)] <- NA
+``` 
+
+# 3. Duration per person
+
+The next block of code calculates the time each participant spent on their feedback screen, as well was their mean visit duration, the SD of their feedback duration and the number of visits.
+
+```{r}
+# Make form with all relevant people
+people_frame <- days %>% select(username) %>% unique()
+people_frame$ins_dur <- NA
+people_frame$ins_mean <- NA
+people_frame$ins_sd <- NA
+people_frame$ins_n_dur
+
+# Make list of names
+people <- unique(days$username)
+
+# Calculate per person the combined duration
+for(i in 1:nrow(people_frame)){
+  frame <- days %>% filter(username == people[i])
+  people_frame$ins_dur[i] <- sum(frame$duration, na.rm = T)
+  people_frame$ins_mean[i] <- mean(frame$duration, na.rm = T)
+  people_frame$ins_sd[i] <- sd(frame$duration, na.rm = T)
+  people_frame$ins_n_dur[i] <- nrow(frame)
+}
+
+# Rename columns
+colnames(people_frame) <- c("username", "insights_dur", "insights_dur_mean", "insights_dur_sd", "insights_dur_n")
+
+```
+
+In the next code block, we compute the duration per phase and add this information to the background data frame.
+
+```{r}
+# obtain mean duration per phase
+insight_pers <- as.data.frame(unique(insights$userName))
+colnames(insight_pers) <- ("username")
+
+# Create new variables
+insight_pers$mean_dur1 <- NA
+insight_pers$mean_dur2 <- NA
+insight_pers$mean_dur3 <- NA
+insight_pers$mean_dur4 <- NA
+
+# Calculate variables
+for(i in 1:nrow(insight_pers)){
+  pers <- insights %>% filter(userName == insight_pers$username[i])
+  
+  phase_1 <- pers %>% filter(day == 1)
+  insight_pers$mean_dur1[i] <- mean(phase_1$duration, na.rm = T)
+  
+  phase_2 <- pers %>% filter(day > 1 & day < 8)
+  insight_pers$mean_dur2[i] <- mean(phase_2$duration, na.rm = T)
+  
+  phase_3 <- pers %>% filter(day > 7 & day < 14)
+  insight_pers$mean_dur3[i] <- mean(phase_3$duration, na.rm = T)
+  
+  phase_4 <- pers %>% filter(day > 13)
+  insight_pers$mean_dur4[i] <- mean(phase_4$duration, na.rm = T)
+}
+
+# Replace NaN to na
+insight_pers <- insight_pers %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+# Merge data with background
+background <- left_join(background, insight_pers, by = "username")
+```
+
+
+# 4. Other variables 
+
+In the next block of code, the last active day of the participants is calculated and added to a data frame.
+
+```{r}
+# final active day
+perstest <- data_save %>% filter(userName == unique(data_save$userName)[1])
+save <- as.data.frame(unique(data_save$userName))
+save$lastactday <- NA
+save$lastactday_cap30 <- NA
+
+for(i in 1:length(unique(data_save$userName))){
+  
+  # Last active day after registering
+  obj <- data_save %>% filter(userName == unique(data_save$userName)[i])
+  save$lastactday[i] <- max(obj$day, na.rm = T)
+  
+  # Obtain last active day, within 30 days
+  obj2 <- obj %>% filter(day < 31)
+  save$lastactday_cap30[i] <- max(obj2$day, na.rm = T)
+}
+
+# make separate object for the information + rename vars
+lastactiveday <- save
+colnames(lastactiveday) <- c("username", "lastactday", "lastactday_cap30")
+```
+
+# 5. Variables on whether new data was added before viewing the data.
+
+In the next block of code, we compute variables that show for each feedback visit whether new data was added before the visit.
+
+```{r}
+# change transaction times to correct format and lower by 2 hours to be compatible with the other data frames
+transactions$transstart_dt <- ymd_hms(transactions$transstart)
+transactions$transstart_dt <- transactions$transstart_dt - 7200
+
+# Create username object to link data
+userid <- background %>% select(username, dbuser)
+colnames(userid) <- c("username", "user_id")
+
+# add username to transactions
+transactions <- left_join(transactions, userid, by = "user_id")
+
+# overview of transaction moments
+trans_small <- transactions %>% select(username, transstart_dt)
+
+# Reclass timestamps in days frame
+days$time_dt <- ymd_hms(days$time)
+
+# calculate # of entries prior to check
+days$nentries
+
+for(i in 1:nrow(days)){
+  small <- trans_small %>% filter(username == days$username[i])
+  small2 <- small %>% filter(transstart_dt < days$time_dt[i])
+  days$nentries[i] <- nrow(small2)
+}
+
+# Caculate number of new entries since last visit
+days$newentries_n <- NA
+
+for(i in 2:nrow(days)){
+  if(days$username[i] == days$username[i - 1]){
+    days$newentries_n[i] <- days$nentries[i] - days$nentries[i - 1]}
+  else{
+      days$newentries_n[i] <- days$nentries[i]
+  }}
+
+# Fix the first row
+days$newentries_n[1] <- days$nentries[1]
+
+# Indicate whether new entries are made
+days$new_information <- "no"
+days$new_information[days$newentries_n > 0] <- "yes"
+
+```
+
+# 6. Save the created variables as a new completed data frame
+
+In the next code block, the created variables that were not yet added to the background data frame are added to the frame. The frame is then saved to be used for the analysis of the manuscript. 
+
+```{r}
+# Filter the number of clicks of the insightsScreen
+insights_clicks <- clicks %>% filter(objectName == "InsightsScreen") %>% select(userName, clicks)
+colnames(insights_clicks) <- c("username", "n_insight_clicks")
+
+# Merge with background
+background <- left_join(background, insights_clicks, by = "username")
+background <- left_join(background, people_frame, by = "username")
+background <- left_join(background, maxDayFrame, by = "username")
+background <- left_join(background, number_meaningful, by = "username")
+background <- left_join(background, lastactiveday, by = "username")
+
+# Delete person that is in double
+background <- background[!(background$username == "bQHJpHd" & background$n_insight_clicks == 1),]
+
+# Obtain relevant variables
+insights_data <- background %>% select(username, group, n_insight_clicks, insights_dur, insights_dur_mean, registered, active, day_last_feedback_visit, meaningful_feedback_visits, first_meaningful, last_meaningful, number_after14, nprod, nprodavg, scans, manual, ndevices, dayswithentry, activedays, lastactday, lastactday_cap30, mode)
+
+# Save table to have data frame ready
+write.csv(background, file = "../Thijs/background_vars.csv")
+
+# Save days data frame as insights data
+write.csv(days, "insights_added.csv")
+```
+
+

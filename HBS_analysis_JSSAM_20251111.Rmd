@@ -1,0 +1,376 @@
+---
+title: "HBS feedback paper - Analysis script"
+output: html_document
+date: "2025-09-30"
+---
+
+# Introduction
+
+In this document the code is provided for all analyses conducted in the paper 'Understanding app-diary study participant's interactions with feedback using in-app paradata' by Carrière et al. In the block below, relevant packages and required data files are loaded in.
+
+```{r}
+# Packages
+library(tidyverse)
+library(haven)
+library(labelled)
+library(lubridate)
+library(chron)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(patchwork)
+library(ggpattern)
+library(margins)
+library(onewaytests)
+library(coin)
+
+# Import data - Insert correct data files and paths
+days <- read.csv("insights_added.csv")[,-1] # Feedback visits and related paradata
+background <- read.csv("background_vars.csv")[,-1] # Background characateristics of households
+transactions <- read.csv("NLtransplus.csv")[,-1] # Substantive data on the data entries made
+
+## Change the background feedback variable
+background$feedback <- NA
+background$feedback[grep(".*delayed.*", background$group)] <- "delayed"
+background$feedback[grep(".*all.*", background$group)] <- "instant"
+```
+
+The following block of code filters out feedback visits that should not be included in the analysis. These are feedback visits shorter than 3.5 seconds, or feedback visits for the delayed feedback group before day 14. 
+
+```{r}
+# Filter the feedback visits from the frame that are not in the period that feedback was available.
+days_clean <- days %>% filter(feedback == "instant" | (feedback == "delayed" & day > 13))
+
+# Decide cutoff here
+days_clean_cut <- days_clean %>% filter(duration > 3)
+
+# Select users with feedback visits
+visit_users <- days_clean_cut %>% select(username) %>% unique()
+
+# New variables
+visit_users$meaningful_visits_total <- NA
+visit_users$meaningful_a14 <- NA
+visit_users$mean_duration <- NA
+visit_users$mean_duration_a14 <- NA
+
+# Calculate variables
+for(i in 1:nrow(visit_users)){
+  frame <- days_clean_cut %>% filter(username == visit_users$username[i])
+  
+  visit_users$meaningful_visits_total[i] <- nrow(frame)
+  visit_users$meaningful_a14[i] <- frame %>% filter(day > 13) %>% nrow()
+  visit_users$mean_duration[i] <- mean(frame$duration, na.rm = T)
+  frame_a14 <- frame %>% filter(day > 13)
+  visit_users$mean_duration_a14[i] <- mean(frame_a14$duration, na.rm = T)
+}
+
+# Adjust for NaNs
+visit_users$mean_duration_a14[is.nan(visit_users$mean_duration_a14) == T] <- 0
+
+```
+
+## Merge with background
+
+In the following block of code we merge the background characteristics with the visit statistics per household.
+
+```{r}
+# New dataframe
+background2 <- left_join(background, visit_users, by = c("username"))
+
+# revalue 0's
+active_2 <- background2 %>% filter(active == "TRUE")
+active_2$meaningful_visits_total[is.na(active_2$meaningful_visits_total) == T] <- 0
+active_2$meaningful_a14[is.na(active_2$meaningful_a14) == T] <- 0 
+active_2$mean_duration[is.na(active_2$mean_duration) == T] <- 0 
+active_2$mean_duration_a14[is.na(active_2$mean_duration_a14) == T] <- 0 
+
+```
+
+
+# Graphs
+
+The following block of code provides the graphs that are presented in Figure 2 and Figure 3 of the manuscript.
+
+```{r}
+# Figure 1
+ggplot(active_2) +
+  geom_bar(aes(x = meaningful_visits_total, fill = feedback), position = position_dodge(preserve = "single")) +
+  theme_minimal() +
+  xlab("Number of feedback visits (>3.5 seconds)")
+
+# Figure 2
+# Summarize each day
+mean_durations <- days %>%
+  dplyr::filter(day < 26) %>%
+  dplyr::group_by(day, feedback) %>% 
+  dplyr::summarise("mean_duration" = mean(duration, na.rm = T), "sd" = sd(duration, na.rm = T)) %>%
+  filter(feedback == "instant" | day > 13)
+
+# Plot the mean duration per day
+ggplot(data = mean_durations) +
+  geom_col(aes(x = day, y = mean_duration, fill = feedback), position = position_dodge(preserve = "single")) +
+  theme_minimal() +
+  ylab("mean duration (s)")
+
+```
+
+## Summary stats
+
+The following block of code provide the summary statistics of feedback visits as presented in section 4.2 of the manuscript. The second block of code tests for significant differences between feedback visit behavior after day 14 between the two feedback conditions, as also presented in section 4.2 of the manuscript. 
+
+```{r}
+# Summary visit statistics (# of visits; % never visited; mean visit duration; median visit duration)
+
+## All instant feedback (include all)
+active_instant_2 <- active_2 %>% filter(feedback == "instant")
+mean(active_instant_2$meaningful_visits_total) # 5.73 average visits
+table(active_instant_2$meaningful_visits_total)[1]/nrow(active_instant_2) # 13.4% never visited
+
+mean(active_instant_2$mean_duration) # 13.64 (including 0, including only meaningful) seconds mean duration
+median(active_instant_2$mean_duration) # 11.19 seconds median duration
+
+
+## Instant feedback after day 14 (include completers)
+mean(active_instant_2$meaningful_a14) # 1.67
+table(active_instant_2$meaningful_a14)[1]/nrow(active_instant_2) # 42.9%
+
+mean(active_instant_2$mean_duration_a14) # 8.36 (including 0, including only meaningful)
+median(active_instant_2$mean_duration_a14) # 6.67
+
+
+## Delayed feedback after day 14 (include completers)
+active_del_2 <- active_2 %>% filter(feedback == "delayed")
+mean(active_del_2$meaningful_a14) # 1.45
+table(active_del_2$meaningful_a14)[1]/nrow(active_del_2) # 37.8%
+
+mean(active_del_2$mean_duration_a14) # 11.20 (including 0s, only meaningful visits)
+median(active_del_2$mean_duration_a14) # 10.5
+
+
+## mean visit duration when only considering people who did visit (so not 0's)
+active_instant_2 %>% filter(mean_duration > 0) %>% summarize(mean(mean_duration)) # 15.76 (all meaningful visits, only including participants with at least 1 visit)
+active_instant_2 %>% filter(mean_duration > 0) %>% summarize(median(mean_duration))
+active_instant_2 %>% filter(mean_duration_a14 > 0) %>% summarize(mean(mean_duration_a14)) # 14.63 (meaningful visits after day 14, only including participants with at least 1 feedback visit)
+active_instant_2 %>% filter(mean_duration_a14 > 0) %>% summarize(median(mean_duration_a14))
+active_del_2 %>% filter(mean_duration_a14 > 0) %>% summarize(mean(mean_duration_a14)) # 18.01 (meaningful visits after day 14, only including participants with at least 1 feedback visit)
+active_del_2 %>% filter(mean_duration_a14 > 0) %>% summarize(median(mean_duration_a14))
+```
+
+
+```{r}
+# Comparison tests between instant and delayed after day 14.
+
+# T-test comparison corrected visiting times
+a14_instant_times <- active_instant_2 %>% filter(mean_duration_a14 > 0)
+a14_delayed_times <- active_del_2 %>% filter(mean_duration_a14 > 0)
+
+## T-test comparisons
+t.test(x = active_instant_2$meaningful_a14, y = active_del_2$meaningful_a14, var.equal = F) # t = .716, p = .475
+t.test(x = a14_instant_times$mean_duration_a14, y = a14_delayed_times$mean_duration_a14, var.equal = F) # t = -1.92, p = 0.057
+
+
+a14_all <- active_2 %>% filter(mean_duration_a14 > 0)
+a14_all$feedback <- as.factor(a14_all$feedback)
+median_test(mean_duration_a14 ~ feedback, data = a14_all) # z = 1.90, p = .057
+wilcox.test(a14_instant_times$meaningful_a14, a14_delayed_times$meaningful_a14) # W = 2830.5, p = .560
+
+active_a14_new <- active_2 %>% filter(complete == "TRUE")
+table(active_a14_new$meaningful_a14, active_a14_new$feedback)
+table(active_a14_new$feedback)
+
+## Z-test comparisons of percentages
+prop.test(x = c(31, 25), n = c(104, 99)) # x = .323, p = .570 (ins, del)
+
+```
+
+## Linear models
+
+In the following blocks, we run the linear and logistic regressions presented in Table 1 of the manuscript. First, we revalue some of the variables for the model. In the second block, the actual models are run.
+
+```{r}
+# Revalue household size
+active_2$householdsize <- case_when(active_2$TypeHH == "1. 1" ~ "1 person",
+                                      active_2$TypeHH == "2. 2" ~ "more people",
+                                      active_2$TypeHH == "3. 2+" ~ "more people",
+                                      active_2$TypeHH == "4. 1+" ~ "more people",
+                                      active_2$TypeHH == "5. overig" ~ "more people")
+
+# Revalue income
+active_2$income_num <- case_when(active_2$InkomenHH == "0. Missing" ~ NA,
+                                   active_2$InkomenHH == "1. 0-20% perc" ~ 1,
+                                   active_2$InkomenHH == "2. 20-40% perc" ~ 2,
+                                   active_2$InkomenHH == "3. 40-60% perc" ~ 3,
+                                   active_2$InkomenHH == "4. 60-80% perc" ~ 4,
+                                   active_2$InkomenHH == "5. 80-100% perc" ~ 5,)
+
+# Revalue age
+active_2$leeftijd_num <- case_when(active_2$Leeftijd15 == "04. 18-24" ~ 21,
+                                     active_2$Leeftijd15 == "05. 25-29" ~ 27,
+                                     active_2$Leeftijd15 == "06. 30-34" ~ 32,
+                                     active_2$Leeftijd15 == "07. 35-39" ~ 37,
+                                     active_2$Leeftijd15 == "08. 40-44" ~ 42,
+                                     active_2$Leeftijd15 == "09. 45-49" ~ 47,
+                                     active_2$Leeftijd15 == "10. 50-54" ~ 52,
+                                     active_2$Leeftijd15 == "11. 55-59" ~ 57,
+                                     active_2$Leeftijd15 == "12. 60-64" ~ 62,
+                                     active_2$Leeftijd15 == "13. 65-69" ~ 67,
+                                     active_2$Leeftijd15 == "14. 70-74" ~ 72,
+                                     active_2$Leeftijd15 == "15. >=75" ~ 77,)
+
+```
+
+
+```{r}
+# Outcome variable for 'did visit at all'
+active_2$did_watch <- case_when(active_2$meaningful_visits_total > 0 ~ "yes", 
+                                  .default = "no")
+active_2$did_watch <- as.factor(active_2$did_watch)
+
+# First model to see who looks at all
+mod1_visit <- glm(did_watch ~ feedback + income_num + leeftijd_num + householdsize + activedays + manual + scans + Geslacht + mode + nprodavg, data = active_2, family = "binomial")
+summary(mod1_visit)
+exp(mod1_visit$coefficients)
+
+## Now split out the people that visited feedback for next models
+active_watchers_2 <- active_2 %>% filter(did_watch == "yes")
+
+# number of visits model
+mod2_nvisit <- lm(meaningful_visits_total ~ feedback + income_num + leeftijd_num + householdsize + activedays + manual + scans + Geslacht + mode + nprodavg, data = active_watchers_2)
+summary(mod2_nvisit)
+
+# Time of visits model
+mod3_duration <- lm(mean_duration ~ feedback + income_num + leeftijd_num + householdsize + activedays + manual + scans + Geslacht + mode + nprodavg, data = active_watchers_2)
+summary(mod3_duration)
+```
+
+
+# Quality models
+
+The following code blocks provides the results as provided in section 4.3 of the manuscript. 
+The first block filters the relevant information from the transactions and makes it mergeable with the other files
+
+```{r}
+## Alter variables in the transaction data set for the analysis
+# create new day-variable
+transactions$full_day <- ceiling(transactions$transdays)
+
+# change transaction times to correct format and lower by 2 hours to be compatible with the other data frames
+transactions$transstart_dt <- ymd_hms(transactions$transstart)
+transactions$transstart_dt <- transactions$transstart_dt - 7200
+
+# Create username object to link data
+userid <- background %>% select(username, dbuser, feedback)
+colnames(userid) <- c("username", "user_id", "feedback")
+
+# add username to transactions
+transactions <- left_join(transactions, userid, by = "user_id")
+```
+
+The following block of code prepares the analysis on consistency of reporting, calculating the number of entries per study phase for each participant.
+
+```{r}
+# Add phase numbers to the transactions
+transactions$phase <- case_when(transactions$full_day < 14 ~ "inclusion",
+                                transactions$full_day > 13 ~ "exclusion")
+
+transactions$phase <- factor(transactions$phase, levels = c("inclusion", "exclusion"))
+
+# Create saving df
+unique_users <- unique(transactions$username)
+
+entry_phases <- as.data.frame(unique_users)
+colnames(entry_phases) <- c("username")
+
+# New variables in df
+entry_phases$phase_incl <- NA
+entry_phases$phase_excl <- NA
+
+# Calculate numbers
+for(i in 1:nrow(entry_phases)){
+  pers <- transactions %>% filter(username == unique_users[i])
+  
+  entry_phases$phase_incl[i] <- pers %>% filter(phase == "inclusion") %>% nrow()
+  entry_phases$phase_excl[i] <- pers %>% filter(phase == "exclusion") %>% nrow()
+}
+
+# join new data with background variables
+active_watchers_2 <- left_join(active_watchers_2, entry_phases, by = "username")
+active_2 <- left_join(active_2, entry_phases, by = "username")
+```
+
+In the next block, we calculate the other data quality measures per household. 
+
+```{r}
+# Variable for the average product price variance
+transactions$prod_avg_price <- transactions$amount / transactions$nprod
+
+# Create variables that capture variance in entry data
+unique_users <- unique(transactions$username)
+
+# Create df to store outcomes
+data_quality <- as.data.frame(unique_users)
+colnames(data_quality) <- c("username")
+
+# New variables
+data_quality$var_amount_incl <- NA
+data_quality$mean_amount_incl <- NA
+data_quality$var_prodavg_incl <- NA
+data_quality$mean_prodavg_incl <- NA
+data_quality$var_prodnum_incl <- NA
+data_quality$mean_prodnum_incl <- NA
+
+
+# Calculate outcomes per person
+for(i in 1:length(unique_users)){
+  pers <- transactions %>% filter(username == unique_users[i])
+  
+  inclusion <- pers %>% filter(full_day < 14)
+  
+  # Calculate per phase the variance variables
+  data_quality$var_amount_incl[i] <- sd(inclusion$amount, na.rm = T)
+  data_quality$mean_amount_incl[i] <- mean(inclusion$amount, na.rm = T)
+  
+  data_quality$var_prodavg_incl[i] <- sd(inclusion$prod_avg_price, na.rm = T)
+  data_quality$mean_prodavg_incl[i] <- mean(inclusion$prod_avg_price, na.rm = T)
+  
+  data_quality$var_prodnum_incl[i] <- sd(inclusion$nprod, na.rm = T)
+  data_quality$mean_prodnum_incl[i] <- mean(inclusion$nprod, na.rm = T)
+}
+
+# Merge new variables with old df
+active_watchers_2 <- left_join(active_watchers_2, data_quality, by = "username")
+active_2 <- left_join(active_2, data_quality, by = "username")
+```
+
+The next block compares the feedback conditions on the data quality measures.
+
+```{r}
+# amount spent per purchase
+t.test(x = active_2$var_amount_incl[active_2$feedback == "instant"], y = active_2$var_amount_incl[active_2$feedback == "delayed"])
+
+# Average product cost
+t.test(x = active_2$var_prodavg_incl[active_2$feedback == "instant"], y = active_2$var_prodavg_incl[active_2$feedback == "delayed"])
+
+# Average number of products
+t.test(x = active_2$var_prodnum_incl[active_2$feedback == "instant"], y = active_2$var_prodnum_incl[active_2$feedback == "delayed"])
+
+# Total entries made
+t.test(x = active_2$phase_incl[active_2$feedback == "instant"], y = active_2$phase_incl[active_2$feedback == "delayed"], var.equal = F)
+```
+
+This last block provides the linear models that link data quality to feedback visit behavior.
+
+```{r}
+# Quality prediction models
+qual_mod1 <- lm(var_amount_incl ~ mean_duration + meaningful_visits_total, data = active_watchers_2)
+summary(qual_mod1)
+
+qual_mod2 <- lm(var_prodavg_incl ~ mean_duration + meaningful_visits_total, data = active_watchers_2)
+summary(qual_mod2)
+
+qual_mod3 <- lm(var_prodnum_incl ~ mean_duration + meaningful_visits_total, data = active_watchers_2)
+summary(qual_mod3)
+
+qual_mod4 <- lm(phase_incl ~ mean_duration + meaningful_visits_total, data = active_watchers_2)
+summary(qual_mod4)
+```

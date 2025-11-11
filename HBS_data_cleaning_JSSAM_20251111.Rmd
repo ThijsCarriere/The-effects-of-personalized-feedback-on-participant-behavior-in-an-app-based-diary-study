@@ -1,0 +1,133 @@
+---
+title: "Data_wrangling"
+author: "Thijs Carrière"
+date: "24-5-2024"
+output: html_document
+---
+
+# 0. Introduction 
+
+The code in this document prepares the raw data to the variables used in the analyses presented in the manuscript "The effects of personalized feedback on participant behavior in an app-based diary study". 
+
+This first code block loads the packages used in this document and loads the data used.
+
+```{r message=FALSE, warning=FALSE}
+# Packages
+library(tidyverse)
+library(haven)
+library(labelled)
+library(lubridate)
+library(chron)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(patchwork)
+library(ggpattern)
+library(margins)
+
+# Read in data
+
+# Number of visits per screen
+clicks <- read.csv("nl_paradataClicks.csv") # Insert correct file path
+
+# App usage with time stamps
+times <- read.csv("nl_paradataDateTimes.csv") # Insert correct file path
+
+# Transaction data (data on the entries made in the app, both scans and manual entries)
+transactions <- read.csv("NLtransplus.csv") # Insert correct file path
+
+# Number of seconds per screen type
+screen_times <- read.csv("nl_paradataScreenTimes.csv") # Insert correct file path
+
+# Summary data
+app_usage <- read.csv("NLhhsummary.csv") # Insert correct file path
+
+# Background questionnaire
+background <- read.csv("NLrespanalysis.csv") # Insert correct file path
+
+```
+
+
+# 1. Durations
+
+We try to calculate duration times for each action. We filter per individual, and order the actions per date. Than the difference in time is calculated until the next action. Here, we did not yet account for different devices. The obtained times are seen as screentimes and are used as the primary data in the analysis of this study.
+
+```{r}
+# Split the times
+data_new <- times
+
+# Create variables where data can be stored
+data_new$duration <- NA
+data_new$day <- NA
+
+data_save <- data_new[1,]
+
+
+# Select the unique users
+unique_users <- unique(data_new$userName)
+
+# Calculate duration per person 
+for(i in 1:length(unique_users)){
+  data_pers <- data_new %>% filter(userName == unique_users[i])
+  data_pers$duration <- NA
+  data_pers <- data_pers[order(data_pers$time),]
+  
+  # Per person make the list
+  for(j in 1:(nrow(data_pers)-1)){
+    data_pers$duration[j] <- as.numeric(difftime(data_pers$time[j+1], data_pers$time[j], units = "secs"))
+    data_pers$day[j] <- ceiling(as.numeric(difftime(data_pers$time[j], data_pers$time[1], units = "days")))
+  }
+  
+  # merge the duration with the original frame
+  data_save <- rbind(data_save, data_pers)
+}
+
+# Delete 'storage row'
+data_save <- data_save[-1,]
+
+# Save updated dataframe
+write.csv(data_save, "time_frame.csv")
+```
+
+Next, we create subsets of data used further in the script
+
+```{r}
+# Make a subset of the insights screens
+insights <- data_save %>% filter(objectName == "InsightsScreen")
+
+# Separate data frame with days
+days <- data_save %>% filter(objectName == "InsightsScreen")
+
+# New labels for feedback
+days$feedback <- NA
+days$feedback[grep(".*delayed.*", days$groupName)] <- "delayed"
+days$feedback[grep(".*all.*", days$groupName)] <- "instant"
+
+# Rename the 'userName' variable
+names(days)[names(days) == "userName"] <- "username"
+
+```
+
+
+# 2. Save the created variables as a new completed data frame
+
+In the next code block, the created variables that were not yet added to the background data frame are added to the frame. The frame is then saved to be used for the analysis of the manuscript. 
+
+```{r}
+# Filter the number of clicks of the insightsScreen
+insights_clicks <- clicks %>% filter(objectName == "InsightsScreen") %>% select(userName, clicks)
+colnames(insights_clicks) <- c("username", "n_insight_clicks")
+
+# Merge with background
+background <- left_join(background, insights_clicks, by = "username")
+
+# Delete person that is in double
+background <- background[!(background$username == "bQHJpHd" & background$n_insight_clicks == 1),]
+
+# Save table to have data frame ready
+write.csv(background, file = "background_vars.csv")
+
+# Save days data frame as insights data
+write.csv(days, "insights_added.csv")
+```
+
